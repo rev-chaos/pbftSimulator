@@ -1,18 +1,15 @@
 package pbftSimulator.replica;
 
-import java.util.Queue;
-
-import pbftSimulator.Message;
-import pbftSimulator.Settings;
+import pbftSimulator.message.Message;
 
 public class OfflineReplica extends Replica{
 	
-	public OfflineReplica(int id, boolean isByzt, int[] netDlys) {
-		super(id, isByzt, netDlys);
+	public OfflineReplica(int id, int[] netDlys, int[] netDlysToClis) {
+		super(id, netDlys, netDlysToClis);
 	}
 	
-	public void msgProcess(Message msg, Queue<Message> msgQue) {
-		msg.print(Settings.disconnectTag);
+	public void msgProcess(Message msg) {
+		msg.print("Disconnect");
 		return;
 	}
 	

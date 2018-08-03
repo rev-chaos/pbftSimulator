@@ -1,328 +1,642 @@
 package pbftSimulator.replica;
 
-import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Queue;
+import java.util.Set;
 
-import pbftSimulator.Message;
-import pbftSimulator.Settings;
-import pbftSimulator.Status;
+import pbftSimulator.Client;
+import pbftSimulator.Simulator;
 import pbftSimulator.Utils;
+import pbftSimulator.message.CheckPointMsg;
+import pbftSimulator.message.CommitMsg;
+import pbftSimulator.message.LastReply;
+import pbftSimulator.message.Message;
+import pbftSimulator.message.NewViewMsg;
+import pbftSimulator.message.PrePrepareMsg;
+import pbftSimulator.message.PrepareMsg;
+import pbftSimulator.message.ReplyMsg;
+import pbftSimulator.message.RequestMsg;
+import pbftSimulator.message.TimeOutMsg;
+import pbftSimulator.message.ViewChangeMsg;
 
 public class Replica {
 	
-	protected String receiveTag;
+	public static final int K = 10;						//å‘é€checkpointæ¶ˆæ¯çš„å‘¨æœŸ
 	
-	protected String sendTag;
+	public static final int L = 30;						//L = é«˜æ°´ä½ - ä½æ°´ä½		(ä¸€èˆ¬å–L>=K*2)
 	
-	protected String processTag;
+	public static final int PROCESSING = 0;		//æ²¡æœ‰æ”¶åˆ°f+1ä¸ªreply
 	
-	protected boolean isByzt;					// ÊÇ·ñÊÇ°İÕ¼Í¥½Úµã
+	public static final int STABLE = 1;			//å·²ç»æ”¶åˆ°äº†f+1ä¸ªreply
 	
-	protected int id; 								//µ±Ç°½ÚµãµÄid
+	public String receiveTag = "Receive";
 	
-	protected HashMap<String, Status> statMap;	//ÏûÏ¢×´Ì¬map
+	public String sendTag = "Send";
 	
-	protected HashMap<String, ArrayList<Message>> msgCache;  //Î´´¦ÀíÏûÏ¢»º´æ
+	public int id; 										//å½“å‰èŠ‚ç‚¹çš„id
 	
-	protected int netDlys[];				//ÓëÆäËû½ÚµãµÄÍøÂçÑÓ³Ù
+	public int v;										//è§†å›¾ç¼–å·
 	
-	public Replica(int id, boolean isByzt, int[] netDlys) {
+	public int n;										//æ¶ˆæ¯å¤„ç†åºåˆ—å·
+	
+	public int lastRepNum;								//æœ€æ–°å›å¤çš„æ¶ˆæ¯å¤„ç†åºåˆ—å·
+	
+	public int h;										//ä½æ°´ä½ = ç¨³å®šçŠ¶æ€checkpointçš„n
+	
+	public int netDlys[];								//ä¸å…¶ä»–èŠ‚ç‚¹çš„ç½‘ç»œå»¶è¿Ÿ
+	
+	public int netDlyToClis[];							//ä¸å®¢æˆ·ç«¯çš„ç½‘ç»œå»¶è¿Ÿ
+	
+	public boolean isTimeOut;							//å½“å‰æ­£åœ¨å¤„ç†çš„è¯·æ±‚æ˜¯å¦è¶…æ—¶ï¼ˆå¦‚æœè¶…æ—¶äº†ä¸ä¼šå†å‘é€ä»»ä½•æ¶ˆæ¯ï¼‰
+	
+	//æ¶ˆæ¯ç¼“å­˜<type, <msg>>:typeæ¶ˆæ¯ç±»å‹;
+	public Map<Integer, Set<Message>> msgCache;
+	
+	//æœ€æ–°replyçš„çŠ¶æ€é›†åˆ<c, <c, t, r>>:cå®¢æˆ·ç«¯ç¼–å·;tè¯·æ±‚æ¶ˆæ¯æ—¶é—´æˆ³;rè¿”å›ç»“æœ
+	public Map<Integer, LastReply> lastReplyMap;		
+	
+	//checkpointsé›†åˆ<n, <c, <c, t, r>>>:næ¶ˆæ¯å¤„ç†åºåˆ—å·
+	public Map<Integer, Map<Integer, LastReply>> checkPoints;
+	
+	public Map<Message, Integer> reqStats;			//requestè¯·æ±‚çŠ¶æ€
+	
+	public static Comparator<PrePrepareMsg> nCmp = new Comparator<PrePrepareMsg>(){
+		@Override
+		public int compare(PrePrepareMsg c1, PrePrepareMsg c2) {
+			return (int) (c1.n - c2.n);
+		}
+	};
+	
+	public Replica(int id, int[] netDlys, int[] netDlyToClis) {
 		this.id = id;
-		this.isByzt = isByzt;
-		statMap = new HashMap<>();
-		msgCache = new HashMap<>();
-		receiveTag = Settings.receiveTag;
-		sendTag = Settings.sendTag;
-		processTag = Settings.processTag;
 		this.netDlys = netDlys;
+		this.netDlyToClis = netDlyToClis;
+		msgCache = new HashMap<>();
+		lastReplyMap = new HashMap<>();
+		checkPoints = new HashMap<>();
+		reqStats = new HashMap<>();
+		checkPoints.put(0, lastReplyMap);
+		//åˆå§‹æ—¶å¯åŠ¨Timer
+		setTimer(lastRepNum + 1, 0);
 	}
 	
-	public void msgProcess(Message msg, Queue<Message> msgQue) {
+	public void msgProcess(Message msg) {
 		msg.print(receiveTag);
-		int type = msg.getType();
-		switch(type) {
-		case Message.Request:
-			receiveRequest(msg, msgQue, msg.getTimestamp());
+		switch(msg.type) {
+		case Message.REQUEST:
+			receiveRequest(msg);
 			break;
-		case Message.Preprepare:
-			receivePreprepare(msg, msgQue, msg.getTimestamp());
+		case Message.PREPREPARE:
+			receivePreprepare(msg);
 			break;
-		case Message.Prepare:
-			receivePrepare(msg, msgQue, msg.getTimestamp());
+		case Message.PREPARE:
+			receivePrepare(msg);
 			break;
-		case Message.Commit:
-			receiveCommit(msg, msgQue);
+		case Message.COMMIT:
+			receiveCommit(msg);
 			break;
-		case Message.ViewChg:
-			receiveViewChange(msg, msgQue, msg.getTimestamp());
+		case Message.VIEWCHANGE:
+			receiveViewChange(msg);
 			break;
-		case Message.NewView:
-			receiveNewView(msg, msgQue, msg.getTimestamp());
+		case Message.NEWVIEW:
+			receiveNewView(msg);
 			break;
-		case Message.TimeOut:
-			receiveTimeOut(msg, msgQue);
+		case Message.TIMEOUT:
+			receiveTimeOut(msg);
+			break;
+		case Message.CHECKPOINT:
+			receiveCheckPoint(msg);
 			break;
 		default:
-			System.out.println("¡¾Error¡¿ÏûÏ¢ÀàĞÍ´íÎó£¡");
-		}
-	}
-	
-	public void receiveRequest(Message msg, Queue<Message> msgQue, long procTime) {
-		if(!preCheckMsg(msg)) return;
-		//²úÉúÒ»ÌõTimeoutÏûÏ¢£¬ÒÔ±ã½«À´¼ì²éÊÇ·ñ·¢Éú³¬Ê±
-		sendTimeOutMsg(msg, msgQue, id);
-		requestProcess(msg, msgQue, procTime);
-		//´¦ÀíÏûÏ¢»º´æÖĞ¿ÉÄÜ´æÔÚµÄºóĞøÏûÏ¢
-		postMsgProcess(msg, msgQue, Message.Preprepare, procTime);
-	}
-	
-	public void receivePreprepare(Message msg, Queue<Message> msgQue, long procTime) {
-		//¼ì²éÏûÏ¢ÊÇ·ñºÏ¹æ£¬²¢×öºÃÏàÓ¦µÄ´¦Àí
-		if(!preCheckMsg(msg)) return;
-		preprepareProcess(msg, msgQue, procTime);
-		postMsgProcess(msg, msgQue, Message.Prepare, procTime);
-	}
-	
-	public void receivePrepare(Message msg, Queue<Message> msgQue, long procTime) {
-		if(!preCheckMsg(msg)) return;
-		prepareProcess(msg, msgQue, procTime);
-		postMsgProcess(msg, msgQue, Message.Commit, procTime);
-	}
-	
-	public void receiveCommit(Message msg, Queue<Message> msgQue) {
-		if(!preCheckMsg(msg)) return;
-		commitProcess(msg, msgQue);
-	}
-	
-	public void receiveTimeOut(Message msg, Queue<Message> msgQue) {
-		if(!preCheckMsg(msg)) return;
-		timeOutProcess(msg, msgQue);
-	}
-	
-	
-	public void receiveViewChange(Message msg, Queue<Message> msgQue, long procTime) {
-		if(!preCheckMsg(msg)) return;
-		viewChangeProcess(msg, msgQue, procTime);
-		postMsgProcess(msg, msgQue, Message.NewView, procTime);
-	}
-	
-	public void receiveNewView(Message msg, Queue<Message> msgQue, long procTime) {
-		if(!preCheckMsg(msg)) return;
-		newViewProcess(msg, msgQue, procTime);
-		postMsgProcess(msg, msgQue, Message.Preprepare, procTime);
-	}
-	
-	public void requestProcess(Message msg, Queue<Message> msgQue, long procTime) {
-		msg.print(processTag);
-		//ĞÂ½¨×´Ì¬
-		statMap.put(msg.getCtx(), new Status(Status.Request, msg.getSeqId(), msg.getPriId(), msg.getTimestamp()));
-		//Èç¹ûÊÇÖ÷½Úµã£¬¾Í·¢ËÍpreprepareÏûÏ¢ºÍprepareÏûÏ¢£¬²¢¸üĞÂ×´Ì¬
-		if(id == msg.getPriId()) {
-			broadcastMsg(Message.Preprepare, msg, msgQue, procTime);	
-		}
-	}
-	
-	public void preprepareProcess(Message msg, Queue<Message> msgQue, long procTime) {
-		msg.print(processTag);
-		Status stat = statMap.get(msg.getCtx());
-		stat.setStage(Status.Preprepare);
-		broadcastMsg(Message.Prepare, msg, msgQue, procTime);
-	}
-	
-	public void prepareProcess(Message msg, Queue<Message> msgQue, long procTime) {
-		msg.print(processTag);
-		Status stat = statMap.get(msg.getCtx());
-		int voteNum = stat.addPrepareVote(msg.getSndId());
-		if(Utils.reachMajority(voteNum)) {
-			stat.setStage(Status.Prepare);
-			broadcastMsg(Message.Commit, msg, msgQue, procTime);
-		}
-	}
-	
-	public void commitProcess(Message msg, Queue<Message> msgQue) {
-		msg.print(processTag);
-		Status stat = statMap.get(msg.getCtx());
-		int voteNum = stat.addCommitVote(msg.getSndId());
-		if(Utils.reachMajority(voteNum)) {
-			stat.setStage(Status.Commit);
-			stat.setEndTime(msg.getTimestamp());
-			//Çå³ıÒÑ¾­½øÈëÎÈ¶¨×´Ì¬µÄÏûÏ¢»º´æ
-			msgCache.remove(msg.getCtx());
-			//´òÓ¡Êä³öÏûÏ¢
-			System.out.println("¡¾Confirmed¡¿ÏûÏ¢:"
-					+msg.getCtx()+"ÔÚ½Úµã"+id+"("+(isByzt?"¶ñÒâ½Úµã":"Õı³£½Úµã")+")½øÈëÎÈÌ¬£¡ÏûÏ¢È·¶¨Ê±ÑÓ:"
-					+(stat.getEndTime()-stat.getStartTime())
-					+";ÏûÏ¢ĞòÁĞ:"+stat.getSeqId()
-					+";Ö÷½Úµã:"+stat.getPriId()
-					);
-			//¸üĞÂÈ«¾Ö¿ØÖÆ±äÁ¿µÄ×´Ì¬
-			Settings.remainConfirms--;
-		}
-	}
-	
-	public void timeOutProcess(Message msg, Queue<Message> msgQue) {
-		msg.print(processTag);
-		broadcastMsg(Message.ViewChg, msg, msgQue, msg.getTimestamp());
-	}
-	
-	public void viewChangeProcess(Message msg, Queue<Message> msgQue, long procTime) {
-		msg.print(processTag);
-		Status stat = statMap.get(msg.getCtx());
-		int voteNum = stat.addViewChgVote(msg);
-		if(Utils.reachMajority(voteNum)) {
-			int rvcId = msg.getPriId();
-			sendOneMsg(Message.NewView, msg, msgQue, rvcId, procTime);
-			//¸üĞÂ×´Ì¬ÎªRequest£¬¸üĞÂprimaryIdºÍSequenceId
-			stat.reset(msg.getSeqId(), msg.getPriId());
-			//²úÉúÒ»ÌõTimeoutÏûÏ¢£¬ÒÔ±ã½«À´¼ì²éÊÇ·ñ·¢Éú³¬Ê±
-			sendTimeOutMsg(msg, msgQue, id);
-		}
-	}
-	
-	public void newViewProcess(Message msg, Queue<Message> msgQue, long procTime) {
-		msg.print(processTag);
-		Status stat = statMap.get(msg.getCtx());
-		int voteNum = stat.addNewViewVote(msg.getSndId());
-		if(Utils.reachMajority(voteNum)) {
-			//ÖØÖÃ×´Ì¬
-			stat.reset(msg.getSeqId(), msg.getPriId());
-			broadcastMsg(Message.Preprepare, msg, msgQue, procTime);
-		}
-	}
-	
-	public boolean preCheckMsg(Message msg) {
-		String key = msg.getCtx();
-		int type = msg.getType();
-		//Èç¹ûÏûÏ¢ÊÇrequestÏûÏ¢,ÇÒÕâ¸örequestÇëÇóÒÑ¾­´¦Àí¹ı£¬ÄÇÃ´¾ÍÂÔ¹ıÕâÌõÏûÏ¢²»´¦Àí
-		if(type == Message.Request) {
-			if(statMap.containsKey(key)) return false;
-			else return true;
-		}
-		//Èç¹û²»ÊÇrequestÏûÏ¢£¬µ«ÓÖÃ»ÓĞÕâÌõÏûÏ¢µÄ×´Ì¬£¬ÄÇÃ´½«ÏûÏ¢´æµ½»º´æÖĞÒÔºó´¦Àí
-		if(!statMap.containsKey(key)) {
-			addMsgToCache(msg);
-			return false;
-		}  
-		Status stat = statMap.get(key);
-		//Èç¹ûÏûÏ¢µÄsequenceIdµÍÓÚµ±Ç°ÏûÏ¢×´Ì¬µÄsequenceId£¬ÂÔ¹ıÕâÌõÏûÏ¢²»´¦Àí
-		if(msg.getSeqId() < stat.getSeqId()) return false;
-		//Èç¹ûÏûÏ¢ÀàĞÍÊÇViewChg»òÕßNewView»òÕßTimeout
-		//ÈôÏûÏ¢ÒÑ¾­½øÈëÎÈÌ¬£¬ÔòÂÔ¹ıÕâÌõÏûÏ¢²»´¦Àí
-		if(type == Message.ViewChg || type == Message.NewView || type == Message.TimeOut) {
-			if(stat.getStage() == Status.Commit) return false;
-			return true;
-		}
-		//ÏûÏ¢ÀàĞÍÊÇPreprepare»òÕßPrepare»òÕßCommit
-		//Èç¹ûÏûÏ¢µÄÖ÷½ÚµãidÓëÏûÏ¢×´Ì¬µÄÖ÷½Úµãid²»Í¬»òÕßseqId¸ßÓÚµ±Ç°µÄÏûÏ¢×´Ì¬µÄseqId
-		//±£´æÏûÏ¢µ½ÏûÏ¢»º´æÖĞµÈÈ·¶¨ĞÂµÄÊÓÍ¼ºóÔÙ×ö´¦Àí
-		if(msg.getPriId() != stat.getPriId() || msg.getSeqId() > stat.getSeqId()) {
-			addMsgToCache(msg);
-			return false;
-		}
-		//Èç¹ûÏûÏ¢µÄÀàĞÍµÍÓÚµ±Ç°µÄ×´Ì¬£¬ºöÂÔ²»×ö´¦Àí
-		if(msg.getType() < stat.getStage()) return false;
-		//Èç¹ûÏûÏ¢µÄÀàĞÍ¸ßÓÚµ±Ç°µÄ×´Ì¬£¬±£´æÏûÏ¢Áô´ıºóĞø´¦Àí
-		if(msg.getType() > stat.getStage()) {
-			addMsgToCache(msg);
-			return false;
-		}
-		return true;
-	}
-	
-	public void postMsgProcess(Message msg, Queue<Message> msgQue, int msgType, long procTime) {
-		ArrayList<Message> nextMsg = getMsgByType(msgType, msg);
-		for(Message m : nextMsg) {
-			switch(msgType) {
-			case Message.Preprepare:
-				receivePreprepare(m, msgQue, procTime);
-				break;
-			case Message.Prepare:
-				receivePrepare(m, msgQue, procTime);
-				break;
-			case Message.Commit:
-				receiveCommit(m, msgQue);
-				break;
-			case Message.NewView:
-				receiveNewView(m, msgQue, procTime);
-				break;
-			default:
-				break;
-			}
-			
-		}
-	}
-	
-	public void broadcastMsg(int type, Message msg, Queue<Message> msgQue, long procTime) {
-		for(int i = 0; i < Settings.N; ++i) {
-			Message newMsg = new Message(type, msg.getCtx(), id, i, 
-					msg.getSeqId(), msg.getPriId(), 
-					procTime + Settings.getNetDelay(msgQue, netDlys[i]));
-			msgQue.add(newMsg);
-			newMsg.print(sendTag);
-		}
-	}
-	
-	public void sendOneMsg(int type, Message msg, Queue<Message> msgQue, int rcvId, long procTime) {
-		Message newMsg = new Message(type, msg.getCtx(), id, rcvId, 
-				msg.getSeqId(), msg.getPriId(), 
-				procTime + Settings.getNetDelay(msgQue, netDlys[rcvId]));
-		msgQue.add(newMsg);
-		newMsg.print(sendTag);
-	}
-	
-	public void sendTimeOutMsg(Message msg, Queue<Message> msgQue, int rcvrId) {
-		Message newMsg = new Message(Message.TimeOut, msg.getCtx(), id, rcvrId, 
-				msg.getSeqId()+1, msg.getPriId()+1, 
-				msg.getTimestamp() + Settings.timeout);
-		msgQue.add(newMsg);
-		newMsg.print("send");
-	}
-	
-	/*
-	 * ´ÓÏûÏ¢»º´æÖĞ»ñÈ¡Ö¸¶¨ÏûÏ¢ÄÚÈİµÄÖ¸¶¨ÀàĞÍµÄÏûÏ¢
-	 * ĞèÒª×¢ÒâµÄÊÇ£º·¢ÉúviewChangeºó£¬ĞèÒª½«Ö®Ç°µÄÏàÍ¬ÀàĞÍµÄÏûÏ¢´ÓcacheÖĞÉ¾È¥
-	 */
-	public ArrayList<Message> getMsgByType(int type, Message msg) {
-		String key = msg.getCtx();
-		ArrayList<Message> rstList = new ArrayList<>();
-		if(!msgCache.containsKey(key)) {
-			return rstList;
-		}
-		ArrayList<Message> msgList = msgCache.get(key);
-		for(Message m: msgList) {
-			//ĞèÒªÏûÏ¢ÄÚÈİ£¬primaryId£¬sequentId¶¼Ò»ÖÂ²Å·µ»Ø£¬
-			//ÏûÏ¢ÄÚÈİºÍÏûÏ¢·¢·¢ËÍÕßid²»»á±»´Û¸Ä£¨ÓĞÕªÒªºÍÇ©Ãû£©
-			if(type == m.getType() && msg.getPriId() == m.getPriId() 
-					&& msg.getSeqId() == m.getSeqId()) {
-				rstList.add(m);
-			}
-		}
-		return rstList;
-	}
-	
-	/*
-	 * ÏòÏûÏ¢»º´æÖĞÔö¼ÓÏûÏ¢
-	 */
-	public void addMsgToCache(Message msg) {
-		String key = msg.getCtx();
-		if(!msgCache.containsKey(key)) {
-			ArrayList<Message> list = new ArrayList<>();
-			list.add(msg);
-			msgCache.put(key, list);
+			System.out.println("ã€Errorã€‘æ¶ˆæ¯ç±»å‹é”™è¯¯ï¼");
 			return;
 		}
-		//×¢Òâ£ºÈç¹ûÓĞÖØ¸´ÀàĞÍµÄÏûÏ¢£¬¾Í²»ĞèÒª»º´æ
-		ArrayList<Message> msgList = msgCache.get(key);
-		boolean flag = true;
-		for(Message m : msgList) {
-			if(m.equals(msg)) {
-				flag = false;
+		//æ”¶é›†æ‰€æœ‰ç¬¦åˆæ¡ä»¶çš„prePrepareæ¶ˆæ¯,å¹¶è¿›è¡Œåç»­å¤„ç†
+		Set<Message> prePrepareMsgSet = msgCache.get(Message.PREPREPARE); 
+		Queue<PrePrepareMsg> executeQ = new PriorityQueue<>(nCmp);
+		if(prePrepareMsgSet == null) return; 
+		for(Message m : prePrepareMsgSet) {
+			PrePrepareMsg mm = (PrePrepareMsg)m;
+			if(mm.v >= v && mm.n >= lastRepNum + 1) {
+				sendCommit(m, msg.rcvtime);
+				executeQ.add(mm);			
 			}
 		}
-		if(flag) {
-			msgList.add(msg);
+		while(!executeQ.isEmpty()) {
+			execute(executeQ.poll(), msg.rcvtime);
+		}
+		//åƒåœ¾å¤„ç†
+		garbageCollect();
+	}
+	
+	public void sendCommit(Message msg, long time) {
+		PrePrepareMsg mm = (PrePrepareMsg)msg;
+		String d = Utils.getMD5Digest(mm.mString());
+		CommitMsg cm = new CommitMsg(mm.v, mm.n, d, id, id, id, time);
+		if(isInMsgCache(cm) || !prepared(mm)) {
+			return;
+		}
+		Simulator.sendMsgToOthers(cm, id, sendTag);
+		addMessageToCache(cm);
+	}
+	
+	public void execute(Message msg, long time) {
+		PrePrepareMsg mm = (PrePrepareMsg)msg;
+		RequestMsg rem = null;
+		ReplyMsg rm = null;
+		if(mm.m != null) {
+			rem = (RequestMsg)(mm.m);
+			rm = new ReplyMsg(mm.v, rem.t, rem.c, id, "result", id, rem.c, time + netDlyToClis[Client.getCliArrayIndex(rem.c)]);
+		}
+		
+		if((rem == null || !isInMsgCache(rm)) && mm.n == lastRepNum + 1 && commited(mm)) {
+			lastRepNum++;
+			setTimer(lastRepNum+1, time);
+			if(rem != null) {
+				Simulator.sendMsg(rm, sendTag);
+				LastReply llp = lastReplyMap.get(rem.c);
+				if(llp == null) {
+					llp = new LastReply(rem.c, rem.t, "result");
+					lastReplyMap.put(rem.c, llp);
+				}
+				llp.t = rem.t;
+				reqStats.put(rem, STABLE);
+				
+			}
+			//å‘¨æœŸæ€§å‘é€checkpointæ¶ˆæ¯
+			if(mm.n % K == 0) {
+				Message checkptMsg = new CheckPointMsg(v, mm.n, lastReplyMap, id, id, id, time);
+//				System.out.println("send:"+checkptMsg.toString());
+				addMessageToCache(checkptMsg);
+				Simulator.sendMsgToOthers(checkptMsg, id, sendTag);
+			}
 		}
 	}
 	
+	public boolean prepared(PrePrepareMsg m) {
+		Set<Message> prepareMsgSet = msgCache.get(Message.PREPARE);
+		if (prepareMsgSet == null) return false;
+		int cnt = 0;
+		String d = Utils.getMD5Digest(m.mString());
+		for(Message msg : prepareMsgSet) {
+			PrepareMsg pm = (PrepareMsg)msg;
+			if(pm.v == m.v && pm.n == m.n && pm.d.equals(d)) {
+				cnt++;
+			}
+		}
+		if(cnt >= 2 * Utils.getMaxTorelentNumber(Simulator.RN)) {
+			return true;
+		}
+		return false;
+	}
+	
+	public boolean commited(PrePrepareMsg m) {
+		Set<Message> commitMsgSet = msgCache.get(Message.COMMIT);
+		if (commitMsgSet == null) return false;
+		int cnt = 0;
+		String d = Utils.getMD5Digest(m.mString());
+		for(Message msg : commitMsgSet) {
+			CommitMsg pm = (CommitMsg)msg;
+			if(pm.v == m.v && pm.n == m.n && pm.d.equals(d)) {
+				cnt++;
+			}
+		}
+		if(cnt > 2 * Utils.getMaxTorelentNumber(Simulator.RN)) {
+			return true;
+		}
+		return false;
+	}
+	
+	public boolean viewChanged(ViewChangeMsg m) {
+		Set<Message> viewChangeMsgSet = msgCache.get(Message.VIEWCHANGE);
+		if (viewChangeMsgSet == null) return false;
+		int cnt = 0;	
+		for(Message msg : viewChangeMsgSet) {
+			ViewChangeMsg vm = (ViewChangeMsg)msg;
+			if(vm.v == m.v && vm.sn == m.sn) {
+				cnt++;
+			}
+		}
+		if(cnt > 2 * Utils.getMaxTorelentNumber(Simulator.RN)) {
+			return true;
+		}
+		return false;
+	}
+	
+	public void garbageCollect() {
+		Set<Message> checkptMsgSet = msgCache.get(Message.CHECKPOINT);
+		if(checkptMsgSet == null) return;
+		//æ‰¾å‡ºæ»¡è¶³f+1æ¡ä»¶çš„æœ€å¤§çš„sn
+		Map<Integer, Integer> snMap = new HashMap<>();
+		int maxN = 0;
+		for(Message msg : checkptMsgSet) {
+			CheckPointMsg ckt = (CheckPointMsg)msg;
+			if(!snMap.containsKey(ckt.n)) {
+				snMap.put(ckt.n, 0);
+			}
+			int cnt = snMap.get(ckt.n)+1;
+			snMap.put(ckt.n, cnt);
+			if(cnt > Utils.getMaxTorelentNumber(Simulator.RN)) {
+				checkPoints.put(ckt.n, ckt.s);
+				maxN = Math.max(maxN, ckt.n);
+			}
+		}
+		//åˆ é™¤msgCacheå’ŒcheckPointsä¸­å°äºnçš„æ‰€æœ‰æ•°æ®ï¼Œä»¥åŠæ›´æ–°hå€¼ä¸ºsn
+		deleteCache(maxN);
+		deleteCheckPts(maxN);
+		h = maxN;
+//		System.out.println(id+"[æ°´ä½]"+h+"-"+(h+L));
+	}
+	
+	public void receiveRequest(Message msg) {
+		if(msg == null) return;
+		RequestMsg reqlyMsg = (RequestMsg)msg;
+		int c = reqlyMsg.c;
+		long t = reqlyMsg.t;
+		//å¦‚æœè¿™æ¡è¯·æ±‚å·²ç»replyè¿‡äº†ï¼Œé‚£ä¹ˆå°±å†å›å¤ä¸€æ¬¡reply
+		if(reqStats.containsKey(msg) && reqStats.get(msg) == STABLE) {
+			long recTime = msg.rcvtime + netDlyToClis[Client.getCliArrayIndex(c)];
+			Message replyMsg = new ReplyMsg(v, t, c, id, "result", id, c, recTime);
+			Simulator.sendMsg(replyMsg, sendTag);
+			return;
+		}
+		if(!reqStats.containsKey(msg)) {
+			//æŠŠæ¶ˆæ¯æ”¾è¿›ç¼“å­˜
+			addMessageToCache(msg);
+			reqStats.put(msg, PROCESSING);
+		}
+		//å¦‚æœæ˜¯ä¸»èŠ‚ç‚¹
+		if(isPrimary()) {
+			//å¦‚æœå·²ç»å‘é€è¿‡PrePrepareæ¶ˆæ¯ï¼Œé‚£å°±å†å¹¿æ’­ä¸€æ¬¡
+			Set<Message> prePrepareSet = msgCache.get(Message.PREPREPARE);
+			if(prePrepareSet != null) {
+				for(Message m : prePrepareSet) {
+					PrePrepareMsg ppMsg = (PrePrepareMsg)m;
+					if(ppMsg.v == v && ppMsg.i == id && ppMsg.m.equals(msg)) {
+						m.rcvtime = msg.rcvtime;
+						Simulator.sendMsgToOthers(m, id, sendTag);
+						return;
+					}
+				}
+			}
+			//å¦åˆ™å¦‚æœä¸ä¼šè¶…è¿‡æ°´ä½å°±ç”Ÿæˆæ–°çš„prePrepareæ¶ˆæ¯å¹¶å¹¿æ’­,åŒæ—¶å¯åŠ¨timeout
+			if(inWater(n + 1)) {
+				n++;
+				Message prePrepareMsg = new PrePrepareMsg(v, n, reqlyMsg, id, id, id, reqlyMsg.rcvtime);
+				addMessageToCache(prePrepareMsg);
+				Simulator.sendMsgToOthers(prePrepareMsg, id, sendTag);
+			}
+		}
+	}
+	
+	public void receivePreprepare(Message msg) {
+		if(isTimeOut) return;
+		PrePrepareMsg prePrepareMsg = (PrePrepareMsg)msg;
+		int msgv = prePrepareMsg.v;
+		int msgn = prePrepareMsg.n;
+		int i = prePrepareMsg.i;
+		//æ£€æŸ¥æ¶ˆæ¯çš„è§†å›¾æ˜¯å¦ä¸èŠ‚ç‚¹è§†å›¾ç›¸ç¬¦ï¼Œæ¶ˆæ¯çš„å‘é€è€…æ˜¯å¦æ˜¯ä¸»èŠ‚ç‚¹ï¼Œ
+		//æ¶ˆæ¯çš„è§†å›¾æ˜¯å¦åˆæ³•ï¼Œåºå·æ˜¯å¦åœ¨æ°´ä½å†…
+		if(msgv < v || !inWater(msgn) || i != msgv % Simulator.RN || !hasNewView(v)) {
+			return;
+		}
+		//æŠŠprePrepareæ¶ˆæ¯å’Œå…¶åŒ…å«çš„requestæ¶ˆæ¯æ”¾è¿›ç¼“å­˜
+		receiveRequest(prePrepareMsg.m);
+		addMessageToCache(msg);
+		n = Math.max(n, prePrepareMsg.n);
+		//ç”ŸæˆPrepareæ¶ˆæ¯å¹¶å¹¿æ’­
+		String d = Utils.getMD5Digest(prePrepareMsg.mString());
+		Message prepareMsg = new PrepareMsg(msgv, msgn, d, id, id, id, msg.rcvtime);
+		if(isInMsgCache(prepareMsg)) return;
+		addMessageToCache(prepareMsg);
+		Simulator.sendMsgToOthers(prepareMsg, id, sendTag);
+	}
+	
+	public void receivePrepare(Message msg) {
+		if(isTimeOut) return;
+		PrepareMsg prepareMsg = (PrepareMsg)msg;
+		int msgv = prepareMsg.v;
+		int msgn = prepareMsg.n;
+		//æ£€æŸ¥ç¼“å­˜ä¸­æ˜¯å¦æœ‰è¿™æ¡æ¶ˆæ¯ï¼Œæ¶ˆæ¯çš„è§†å›¾æ˜¯å¦åˆæ³•ï¼Œåºå·æ˜¯å¦åœ¨æ°´ä½å†…
+		if(isInMsgCache(msg) || msgv < v || !inWater(msgn) || !hasNewView(v)) {
+			return;
+		}
+		//æŠŠprepareæ¶ˆæ¯æ”¾è¿›ç¼“å­˜
+		addMessageToCache(msg);
+	}
+	
+	public void receiveCommit(Message msg) {
+		if(isTimeOut) return;
+		CommitMsg commitMsg = (CommitMsg)msg;
+		int msgv = commitMsg.v;
+		int msgn = commitMsg.n;
+		//æ£€æŸ¥æ¶ˆæ¯çš„è§†å›¾æ˜¯å¦åˆæ³•ï¼Œåºå·æ˜¯å¦åœ¨æ°´ä½å†…
+		if(isInMsgCache(msg) || msgv < v || !inWater(msgn) || !hasNewView(v)) {
+			return;
+		}
+		//æŠŠcommitæ¶ˆæ¯æ”¾è¿›ç¼“å­˜
+		addMessageToCache(msg);
+	}
+	
+	public void receiveTimeOut(Message msg) {
+		TimeOutMsg tMsg = (TimeOutMsg)msg;
+		//å¦‚æœæ¶ˆæ¯å·²ç»è¿›å…¥ç¨³æ€ï¼Œå°±å¿½ç•¥è¿™æ¡æ¶ˆæ¯
+		if(tMsg.n <= lastRepNum || tMsg.v < v ) return;
+		//å¦‚æœä¸å†ä¼šæœ‰æ–°çš„requestè¯·æ±‚ï¼Œåˆ™åœæ­¢timeOut
+		if(reqStats.size() >= Simulator.REQNUM) return;
+		isTimeOut = true;
+		//å‘é€viewChangeæ¶ˆæ¯
+		Map<Integer, LastReply> ss = checkPoints.get(h);
+		Set<Message> C = computeC();
+		Map<Integer, Set<Message>> P = computeP();
+		Message vm = new ViewChangeMsg(v + 1, h, ss, C, P, id, id, id, msg.rcvtime);
+		addMessageToCache(vm);
+		Simulator.sendMsgToOthers(vm, id, sendTag);
+	}
+	
+	public void receiveCheckPoint(Message msg) {
+		CheckPointMsg checkptMsg = (CheckPointMsg)msg;
+		int msgv = checkptMsg.v;
+		//æ£€æŸ¥ç¼“å­˜ä¸­æ˜¯å¦æœ‰è¿™æ¡æ¶ˆæ¯ï¼Œæ¶ˆæ¯çš„è§†å›¾æ˜¯å¦åˆæ³•
+		if(msgv < v ) {
+			return;
+		}
+		//æŠŠcheckpointæ¶ˆæ¯æ”¾è¿›ç¼“å­˜
+		addMessageToCache(msg);
+	}
+	
+	
+	public void receiveViewChange(Message msg) {
+		ViewChangeMsg vcMsg = (ViewChangeMsg)msg;
+		int msgv = vcMsg.v;
+		int msgn = vcMsg.sn;
+		//æ£€æŸ¥ç¼“å­˜ä¸­æ˜¯å¦æœ‰è¿™æ¡æ¶ˆæ¯ï¼Œæ¶ˆæ¯çš„è§†å›¾æ˜¯å¦åˆæ³•
+		if(msgv <= v || msgn < h) {
+			return;
+		}
+		//æŠŠcheckpointæ¶ˆæ¯æ”¾è¿›ç¼“å­˜
+		addMessageToCache(msg);
+		//æ˜¯å¦æ”¶åˆ°äº†2f+1æ¡viewChangeæ¶ˆæ¯
+		if(viewChanged(vcMsg)) {
+			v = vcMsg.v;
+			h = vcMsg.sn;
+			lastRepNum = h;
+			lastReplyMap = vcMsg.ss;
+			n = lastRepNum;
+			Map<Integer, Set<Message>> prePrepareMap = vcMsg.P;
+			if(prePrepareMap != null) {
+				for(Integer nn : prePrepareMap.keySet()) {
+					n = Math.max(n, nn);
+				}
+			}
+			isTimeOut = false;
+			setTimer(lastRepNum + 1, msg.rcvtime);
+			if(isPrimary()) {
+				//å‘é€NewViewæ¶ˆæ¯
+				Map<String, Set<Message>> VONMap = computeVON();
+				Message nvMsg = new NewViewMsg(v, VONMap.get("V"), VONMap.get("O"), VONMap.get("N"), id, id, id, msg.rcvtime);
+				addMessageToCache(nvMsg);
+				Simulator.sendMsgToOthers(nvMsg, id, sendTag);
+				//å‘é€æ‰€æœ‰ä¸åœ¨Oå†…çš„requestæ¶ˆæ¯çš„prePrepareæ¶ˆæ¯
+				Set<Message> reqSet = msgCache.get(Message.REQUEST);
+				if(reqSet == null) reqSet = new HashSet<>();
+				Set<Message> OSet = VONMap.get("O");
+				reqSet.removeAll(OSet);
+				for(Message m : reqSet) {
+					RequestMsg reqMsg = (RequestMsg)m;
+					reqMsg.rcvtime = msg.rcvtime;
+					receiveRequest(reqMsg);
+				}
+			}
+		}
+	}
+	
+	public void receiveNewView(Message msg) {
+		NewViewMsg nvMsg = (NewViewMsg)msg;
+		int msgv = nvMsg.v;
+		//æ£€æŸ¥ç¼“å­˜ä¸­æ˜¯å¦æœ‰è¿™æ¡æ¶ˆæ¯ï¼Œæ¶ˆæ¯çš„è§†å›¾æ˜¯å¦åˆæ³•
+		if(msgv < v) {
+			return;
+		}
+		v = msgv;
+		addMessageToCache(msg);
+		
+		//é€ä¸€å¤„ç†new viewä¸­çš„prePrepareæ¶ˆæ¯
+		Set<Message> O = nvMsg.O;
+		for(Message m : O) {
+			PrePrepareMsg ppMsg = (PrePrepareMsg)m;
+			PrePrepareMsg newPPm = new PrePrepareMsg(v, ppMsg.n, ppMsg.m, ppMsg.i, msg.sndId, msg.rcvId, msg.rcvtime);
+			receivePreprepare(newPPm);
+		}
+		Set<Message> N = nvMsg.N; 
+		for(Message m : N) {
+			PrePrepareMsg ppMsg = (PrePrepareMsg)m;
+			PrePrepareMsg newPPm = new PrePrepareMsg(ppMsg.v, ppMsg.n, ppMsg.m, ppMsg.i, msg.sndId, msg.rcvId, msg.rcvtime);
+			receivePreprepare(newPPm);
+		}
+	}
+	
+	public int getPriId() {
+		return v % Simulator.RN;
+	}
+	
+	public boolean isPrimary() {
+		return getPriId() == id;
+	}
+	
+	/**
+	 * å°†æ¶ˆæ¯å­˜åˆ°ç¼“å­˜ä¸­
+	 * @param m
+	 */
+	private boolean isInMsgCache(Message m) {
+		Set<Message> msgSet = msgCache.get(m.type);
+		if(msgSet == null) {
+			return false;
+		}
+		return msgSet.contains(m);
+	}
+	
+	/**
+	 * å°†æ¶ˆæ¯å­˜åˆ°ç¼“å­˜ä¸­
+	 * @param m
+	 */
+	private void addMessageToCache(Message m) {
+		Set<Message> msgSet = msgCache.get(m.type);
+		if(msgSet == null) {
+			msgSet = new HashSet<>();
+			msgCache.put(m.type, msgSet);
+		}
+		msgSet.add(m);
+	}
+	
+	/**
+	 * åˆ é™¤åºå·nä¹‹å‰çš„æ‰€æœ‰ç¼“å­˜æ¶ˆæ¯
+	 * @param n
+	 */
+	private void deleteCache(int n) {
+		Map<Integer, LastReply> lastReplyMap = checkPoints.get(n);
+		if(lastReplyMap == null)  return;
+		for(Integer type : msgCache.keySet()) {
+			Set<Message> msgSet = msgCache.get(type);
+			if(msgSet != null) {
+				Iterator<Message> it = msgSet.iterator();
+				while(it.hasNext()) {
+					Message m = it.next();
+					if(m instanceof RequestMsg) {
+						RequestMsg mm = (RequestMsg)m;
+						if(lastReplyMap.get(mm.c) != null && mm.t <= lastReplyMap.get(mm.c).t) {
+							it.remove();
+						}
+					}else if(m instanceof PrePrepareMsg) {
+						PrePrepareMsg mm = (PrePrepareMsg)m;
+						if(mm.n <= n) {
+							it.remove();
+						}
+					}else if(m instanceof PrepareMsg) {
+						PrepareMsg mm = (PrepareMsg)m;
+						if(mm.n <= n) {
+							it.remove();
+						}
+					}else if(m instanceof CommitMsg) {
+						CommitMsg mm = (CommitMsg)m;
+						if(mm.n <= n) {
+							it.remove();
+						}
+					}else if(m instanceof CheckPointMsg) {
+						CheckPointMsg mm = (CheckPointMsg)m;
+						if(mm.n < n) {
+							it.remove();
+						}
+					}else if(m instanceof ViewChangeMsg) {
+						ViewChangeMsg mm = (ViewChangeMsg)m;
+						if(mm.sn < n) {
+							it.remove();
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	private void deleteCheckPts(int n) {
+		Iterator<Map.Entry<Integer, Map<Integer, LastReply>>> it = checkPoints.entrySet().iterator();
+		while(it.hasNext()){  
+			Map.Entry<Integer, Map<Integer, LastReply>> entry=it.next(); 
+			int sn = entry.getKey(); 
+			if(sn < n) {
+				it.remove();
+			}
+		}
+	}
+	
+	/**
+	 * åˆ¤æ–­ä¸€ä¸ªè§†å›¾ç¼–å·æ˜¯å¦æœ‰NewViewçš„æ¶ˆæ¯åŸºç¡€
+	 * @return
+	 */
+	public boolean hasNewView(int v) {
+		if(v == 0)
+			return true;
+		Set<Message> msgSet = msgCache.get(Message.NEWVIEW);
+		if(msgSet != null) {
+			for(Message m : msgSet) {
+				NewViewMsg nMsg = (NewViewMsg)m;
+				if(nMsg.v == v) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	
+	private boolean inWater(int n) {
+		return n == 0 || (n > h && n < h + L);
+	}
+	
+	private Set<Message> computeC(){
+		if(h == 0) return null;
+		Set<Message> result = new HashSet<>();
+		Set<Message> checkptSet = msgCache.get(Message.CHECKPOINT);
+		for(Message msg : checkptSet) {
+			CheckPointMsg ckpt = (CheckPointMsg)msg;
+			if(ckpt.n == h) {
+				result.add(msg);
+			}
+		}
+		return result;
+	}
+	
+	private Map<Integer, Set<Message>> computeP(){
+		Map<Integer, Set<Message>> result = new HashMap<>();
+		Set<Message> prePrepareSet = msgCache.get(Message.PREPREPARE);
+		if(prePrepareSet == null) return null;
+		for(Message msg : prePrepareSet) {
+			PrePrepareMsg ppm = (PrePrepareMsg)msg;
+			if(ppm.n > h && prepared(ppm)) {
+				Set<Message> set = result.get(ppm.n);
+				if(set == null) {
+					set = new HashSet<>();
+					result.put(ppm.n, set);
+				}
+				set.add(msg);
+			}
+		}
+		return result;
+	}
+	
+	private Map<String, Set<Message>> computeVON(){
+		int maxN = h;
+		Set<Message> V = new HashSet<>();
+		Set<Message> O = new HashSet<>();
+		Set<Message> N = new HashSet<>();
+		Set<Message> vcSet = msgCache.get(Message.VIEWCHANGE);
+		for(Message msg : vcSet) {
+			ViewChangeMsg ckpt = (ViewChangeMsg)msg;
+			if(ckpt.v == v) {
+				V.add(msg);
+				Map<Integer, Set<Message>> ppMap = ckpt.P;
+				if(ppMap == null) continue;
+				for(Integer n : ppMap.keySet()) {
+					Set<Message> ppSet = ppMap.get(n);
+					if(ppSet == null) continue;
+					for(Message m : ppSet) {
+						PrePrepareMsg ppm = (PrePrepareMsg)m;
+						Message ppMsg = new PrePrepareMsg(v, n, ppm.m, id, id, id, 0);
+						O.add(ppMsg);
+						maxN = Math.max(maxN, n);
+					}
+				}
+			}
+		}
+		for(int i = h; i < maxN; i++) {
+			boolean flag = false;
+			for(Message msg : O) {
+				PrePrepareMsg ppm = (PrePrepareMsg)msg;
+				if(ppm.n == i) {
+					flag = true;
+					break;
+				}
+			}
+			if(!flag) {
+				Message ppMsg = new PrePrepareMsg(v, n, null, id, id, id, 0);
+				N.add(ppMsg);
+			}
+		}
+		Map<String, Set<Message>> map = new HashMap<>();
+		map.put("V", V);
+		map.put("O", O);
+		map.put("N", N);
+		n = maxN;
+		return map;
+	}
+	
+	public void setTimer(int n, long time) {
+		Message timeOutMsg = new TimeOutMsg(v, n, id, id, time + Simulator.TIMEOUT);
+		Simulator.sendMsg(timeOutMsg, sendTag);
+	}
+
 }
